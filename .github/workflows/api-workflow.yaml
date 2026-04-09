@@ -1,0 +1,33 @@
+name: CI/CD for Spring Boot with Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v3
+
+      - name: 🧪 Run tests with Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 🧪 Run tests
+        run: mvn clean test
+        env:
+          RECAPTCHA_SECRET: ${{ secrets.RECAPTCHA_SECRET }}
+          RECAPTCHA_VERIFY_URL: ${{ secrets.RECAPTCHA_VERIFY_URL }}
+
+      - name: 🐳 Build Docker image
+        run: docker build -t springboot-app .
+
+      - name: 🚀 Deploy to Render
+        run: curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
