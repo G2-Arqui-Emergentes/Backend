@@ -18,7 +18,7 @@ FROM eclipse-temurin:17-jdk
 WORKDIR /app
 
 # Copiar el archivo JAR desde la etapa de construcción
-COPY --from=build /app/target/managewise-backend-0.0.1-SNAPSHOT.jar app.jar
+COPY --from=build /app/target/taskmaster-backend-0.0.1-SNAPSHOT.jar app.jar
 
 # Exponer el puerto en el que se ejecutará la aplicación
 EXPOSE 8080
