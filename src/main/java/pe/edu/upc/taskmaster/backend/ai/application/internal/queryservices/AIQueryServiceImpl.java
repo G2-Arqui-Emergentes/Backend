@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.aggregates.AIInsight;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.aggregates.MemberWeeklySummary;
+import pe.edu.upc.taskmaster.backend.ai.domain.model.queries.GetChatbotResponseQuery;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.queries.GetLeaderDashboardQuery;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.queries.GetMemberDashboardQuery;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.valueobjects.AIRecommendation;
@@ -13,8 +14,10 @@ import pe.edu.upc.taskmaster.backend.ai.domain.model.valueobjects.SmartVelocity;
 import pe.edu.upc.taskmaster.backend.ai.domain.services.AIQueryService;
 import pe.edu.upc.taskmaster.backend.ai.infrastructure.client.GeminiApiClient;
 import pe.edu.upc.taskmaster.backend.iam.domain.model.aggregates.User;
+import pe.edu.upc.taskmaster.backend.iam.domain.model.valueobjects.Roles;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.persistence.jpa.repositories.UserRepository;
 import pe.edu.upc.taskmaster.backend.project.domain.model.aggregates.Project;
+import pe.edu.upc.taskmaster.backend.project.domain.model.valueobjects.ProjectStatus;
 import pe.edu.upc.taskmaster.backend.project.infrastructure.persistence.jpa.repositories.ProjectRepository;
 import pe.edu.upc.taskmaster.backend.task.domain.model.aggregates.Task;
 import pe.edu.upc.taskmaster.backend.task.infrastructure.persistence.jpa.repositories.TaskRepository;
@@ -39,6 +42,36 @@ public class AIQueryServiceImpl implements AIQueryService {
     private static final String STATUS_DONE = "DONE";
     private static final String STATUS_IN_PROGRESS = "IN_PROGRESS";
     private static final String STATUS_TO_DO = "TO_DO";
+
+    private static final String SYSTEM_PROMPT = """
+    Eres un asistente experto y amigable en gestión de proyectos para TaskMaster.
+    
+    CONTEXTO DE LA APLICACIÓN:
+    - TaskMaster es una aplicación de gestión de proyectos
+    - Los usuarios pueden ser LÍDERES o MIEMBROS
+    - Los líderes crean proyectos y asignan tareas
+    - Los miembros trabajan en tareas asignadas
+    - Las tareas tienen estados: Pendiente, En progreso, Completada
+    - Las tareas tienen prioridades: Baja, Media, Alta
+    
+    REGLAS DE COMPORTAMIENTO:
+    1. **SOLO** proporciona información de proyectos/tareas cuando el usuario la solicite EXPLÍCITAMENTE
+    2. Si el usuario dice "Eso es todo", "Gracias", "Adiós" - SOLO despídete cordialmente, NO des información adicional
+    3. Si el usuario pregunta sobre temas NO relacionados (anime, deportes, etc.) - Responde que solo ayudas con proyectos y OFRECE ayuda, PERO NO des información de proyectos a menos que el usuario la solicite
+    4. SIEMPRE traduce términos técnicos al español: PLANNED→Planificado, TO_DO→Pendiente, DONE→Completada, IN_PROGRESS→En progreso
+    5. Sé natural y conversacional, pero **NO** sobrecargues al usuario con información no solicitada
+    
+    REGLA DE ORO: 
+    - Si el usuario NO pide información de proyectos → NO des información de proyectos
+    - Si el usuario pide información de proyectos → PROPORCIONA la información y luego ofrece ayuda adicional
+    
+    EJEMPLOS:
+    Usuario: "Eso es todo" → "¡Perfecto! Quedo atento por si necesitas algo más. ¡Que tengas un excelente día!"
+    Usuario: "Conoces sobre anime?" → "Hola, soy un asistente especializado en gestión de proyectos en TaskMaster, por lo que no tengo información sobre anime. ¿En qué puedo ayudarte con tus proyectos hoy?"
+    Usuario: "Dame el resumen de mis proyectos" → "Claro, aquí está el resumen de tus proyectos... [información]. ¿Te gustaría profundizar en algún aspecto específico?"
+    
+    Tu objetivo es ser útil pero respetuoso con el contexto de la conversación.
+    """;
 
     @Override
     public List<AIInsight> handle(GetLeaderDashboardQuery query) {
@@ -836,16 +869,737 @@ public class AIQueryServiceImpl implements AIQueryService {
         return highestRiskProjectId != null ? projectRepository.findById(highestRiskProjectId).orElse(null) : null;
     }
 
+    @Override
+    public String handle(GetChatbotResponseQuery query) {
+        try {
+            User user = userRepository.findById(query.userId())
+                    .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
+
+            boolean isLeader = user.getRoles().stream()
+                    .anyMatch(role -> role.getName() == Roles.ROLE_LEADER);
+            boolean isMember = user.getRoles().stream()
+                    .anyMatch(role -> role.getName() == Roles.ROLE_MEMBER);
+
+            String userMessage = query.userMessage().trim();
+            String normalizedMessage = userMessage.toLowerCase().trim();
+
+            if (isGoodbye(normalizedMessage)) {
+                return generateGoodbyeResponse(user);
+            }
+
+            if (isIrrelevantQuestion(normalizedMessage)) {
+                return generateIrrelevantResponse(user);
+            }
+
+            String userContext = buildUserContext(user, isLeader, isMember);
+
+            String contextSpecificPrompt = "";
+            if (containsAny(normalizedMessage, "resumen", "general", "estado", "información", "informacion")) {
+                contextSpecificPrompt = buildProjectSummaryContext(user, isLeader, isMember);
+            } else if (containsAny(normalizedMessage, "mis tareas", "tareas asignadas", "que tengo que hacer", "pendientes", "tarea")) {
+                contextSpecificPrompt = buildTasksContext(user);
+            } else if (containsAny(normalizedMessage, "riesgo", "riesgos", "peligro", "problema", "critico")) {
+                contextSpecificPrompt = buildRisksContext(user, isLeader);
+            } else if (containsAny(normalizedMessage, "fechas", "fecha limite", "vencimiento", "deadline", "plazo")) {
+                contextSpecificPrompt = buildDeadlinesContext(user, isLeader);
+            } else if (containsAny(normalizedMessage, "carga", "equipo", "miembros", "asignaciones", "distribucion")) {
+                contextSpecificPrompt = buildTeamLoadContext(user, isLeader);
+            }
+
+            if (contextSpecificPrompt.isEmpty() &&
+                    containsAny(normalizedMessage, "proyecto", "proyectos", "tarea", "tareas", "equipo", "lider")) {
+                contextSpecificPrompt = buildProjectSummaryContext(user, isLeader, isMember);
+            }
+
+            if (contextSpecificPrompt.isEmpty()) {
+                return generateHelpResponse(user);
+            }
+
+            String finalPrompt = String.format("""
+            %s
+            
+            === CONTEXTO DEL USUARIO ===
+            %s
+            
+            === INFORMACIÓN ESPECÍFICA ===
+            %s
+            
+            === PREGUNTA DEL USUARIO ===
+            %s
+            
+            === INSTRUCCIONES ===
+            1. Responde la pregunta del usuario basándote en el contexto proporcionado
+            2. TRADUCE todos los términos técnicos al español
+            3. SI la pregunta es sobre información de proyectos, PROPORCIONA la información y luego ofrece ayuda adicional
+            4. NO repitas información que ya diste antes
+            5. Sé natural y conversacional
+            6. Usa el nombre del usuario: %s %s
+            """,
+                    SYSTEM_PROMPT,
+                    userContext,
+                    contextSpecificPrompt,
+                    userMessage,
+                    user.getName(),
+                    user.getLastName()
+            );
+
+            String response = geminiClient.generateContent(finalPrompt);
+            String cleanedResponse = cleanResponse(response);
+
+            if (cleanedResponse == null || cleanedResponse.isEmpty()) {
+                return "Lo siento, no pude procesar tu pregunta en este momento. Por favor, intenta nuevamente más tarde.";
+            }
+
+            return cleanedResponse;
+
+        } catch (Exception e) {
+            return "Lo siento, ocurrió un error al procesar tu mensaje. Por favor, intenta nuevamente.";
+        }
+    }
+
+    private boolean isGoodbye(String message) {
+        String[] goodbyePatterns = {
+                "eso es todo", "eso sería todo", "gracias", "muchas gracias",
+                "adiós", "adios", "chao", "hasta luego", "bye", "goodbye",
+                "ya está", "terminamos", "es todo", "no más preguntas",
+                "me voy", "nos vemos"
+        };
+
+        for (String pattern : goodbyePatterns) {
+            if (message.contains(pattern)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String generateGoodbyeResponse(User user) {
+        String[] goodbyes = {
+                "¡Perfecto, %s! Quedo atento por si necesitas algo más. ¡Que tengas un excelente día!",
+                "Entendido, %s. Recuerda que estoy aquí cuando necesites ayuda con tus proyectos. ¡Hasta luego!",
+                "¡Excelente, %s! Me alegra haber podido ayudarte. No dudes en volver cuando lo necesites. ¡Que tengas un gran día!"
+        };
+        Random random = new Random();
+        return String.format(goodbyes[random.nextInt(goodbyes.length)], user.getName());
+    }
+
+    private boolean isIrrelevantQuestion(String message) {
+        String[] irrelevantTopics = {
+                "anime", "manga", "película", "pelicula", "serie", "videojuego", "juego",
+                "música", "musica", "deporte", "fútbol", "futbol", "béisbol", "beisbol",
+                "política", "politica", "clima", "tiempo", "clima", "vida personal",
+                "comida", "receta", "viaje", "vacaciones", "noticias", "entretenimiento"
+        };
+
+        for (String topic : irrelevantTopics) {
+            if (message.contains(topic)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String generateIrrelevantResponse(User user) {
+        String[] responses = {
+                "Hola %s, soy un asistente especializado en gestión de proyectos en TaskMaster, por lo que no tengo información sobre ese tema. ¿En qué puedo ayudarte con tus proyectos hoy?",
+                "¡Hola %s! Mi enfoque está en ayudarte con la gestión de proyectos y tareas en TaskMaster. No manejo información sobre ese tema. ¿Te gustaría revisar el estado de tus proyectos?",
+                "Hola %s, estoy aquí para ayudarte con la gestión de proyectos, tareas y productividad en TaskMaster. No tengo conocimiento sobre ese tema. ¿Necesitas ayuda con algún proyecto en particular?"
+        };
+        Random random = new Random();
+        return String.format(responses[random.nextInt(responses.length)], user.getName());
+    }
+
+    private String generateHelpResponse(User user) {
+        String[] helps = {
+                "Hola %s, ¿en qué puedo ayudarte hoy? Puedo darte información sobre:\n• Resumen de proyectos\n• Tus tareas pendientes\n• Riesgos y problemas\n• Fechas límite\n• Carga del equipo\n\n¿Qué te gustaría consultar?",
+                "¡Hola %s! Estoy aquí para ayudarte con la gestión de tus proyectos. Puedo contarte sobre:\n• El estado general de tus proyectos\n• Las tareas que tienes asignadas\n• Riesgos potenciales\n• Próximas fechas límite\n• Distribución de trabajo en tu equipo\n\n¿Sobre qué tema te gustaría saber más?"
+        };
+        Random random = new Random();
+        return String.format(helps[random.nextInt(helps.length)], user.getName());
+    }
+
+    private String buildUserContext(User user, boolean isLeader, boolean isMember) {
+        StringBuilder context = new StringBuilder();
+        context.append(String.format("Usuario: %s %s\n", user.getName(), user.getLastName()));
+        context.append(String.format("Roles: %s\n", isLeader ? "LÍDER" : ""));
+        if (isMember) {
+            context.append(isLeader ? ", MIEMBRO" : "MIEMBRO");
+        }
+        context.append("\n");
+
+        if (isMember) {
+            List<Project> memberProjects = new ArrayList<>(user.getMemberInProjects());
+            context.append(String.format("Proyectos asignados: %d\n", memberProjects.size()));
+            for (Project project : memberProjects) {
+                String leaderName = "Sin líder";
+                if (project.getLeaderId() != null) {
+                    User leader = userRepository.findById(project.getLeaderId()).orElse(null);
+                    if (leader != null) {
+                        leaderName = leader.getName() + " " + leader.getLastName();
+                    }
+                }
+                String status = interpretProjectStatus(project.getStatus());
+                context.append(String.format("  - %s (Líder: %s, Estado: %s)\n",
+                        project.getName(),
+                        leaderName,
+                        status
+                ));
+            }
+        }
+
+        if (isLeader) {
+            List<Project> ledProjects = projectRepository.findByLeaderId(user.getId());
+            context.append(String.format("Proyectos liderados: %d\n", ledProjects.size()));
+            for (Project project : ledProjects) {
+                String status = interpretProjectStatus(project.getStatus());
+                context.append(String.format("  - %s (Estado: %s)\n",
+                        project.getName(),
+                        status
+                ));
+            }
+        }
+
+        return context.toString();
+    }
+
+    private String buildProjectSummaryContext(User user, boolean isLeader, boolean isMember) {
+        StringBuilder context = new StringBuilder();
+
+        if (isLeader) {
+            List<Project> projects = projectRepository.findByLeaderId(user.getId());
+            if (projects.isEmpty()) {
+                context.append("No tienes proyectos como líder.\n");
+                return context.toString();
+            }
+
+            for (Project project : projects) {
+                List<Task> tasks = taskRepository.findByProjectId(project.getId());
+                long total = tasks.size();
+                long completed = tasks.stream()
+                        .filter(t -> STATUS_DONE.equals(t.getStatus().toString()))
+                        .count();
+                long inProgress = tasks.stream()
+                        .filter(t -> STATUS_IN_PROGRESS.equals(t.getStatus().toString()))
+                        .count();
+                long toDo = tasks.stream()
+                        .filter(t -> STATUS_TO_DO.equals(t.getStatus().toString()))
+                        .count();
+                long delayed = tasks.stream()
+                        .filter(t -> {
+                            Date endDate = t.getEndDate();
+                            if (endDate == null) return false;
+                            LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                            return endLocalDate.isBefore(LocalDate.now()) && !STATUS_DONE.equals(t.getStatus().toString());
+                        })
+                        .count();
+
+                String statusDescription = interpretProjectStatus(project.getStatus());
+
+                String leaderName = "Sin líder";
+                if (project.getLeaderId() != null) {
+                    User leader = userRepository.findById(project.getLeaderId()).orElse(null);
+                    if (leader != null) {
+                        leaderName = leader.getName() + " " + leader.getLastName();
+                    }
+                }
+
+                context.append(String.format("""
+                Proyecto: %s
+                  - Líder: %s
+                  - Estado: %s
+                  - Tareas totales: %d
+                  - Tareas completadas: %d (%.0f%%)
+                  - Tareas en progreso: %d
+                  - Tareas pendientes: %d
+                  - Tareas atrasadas: %d
+                  - Nivel de riesgo: %s
+                  - Eficiencia: %.0f%%
+                \n""",
+                        project.getName(),
+                        leaderName,
+                        statusDescription,
+                        total,
+                        completed,
+                        total > 0 ? (double) completed / total * 100 : 0,
+                        inProgress,
+                        toDo,
+                        delayed,
+                        interpretRiskLevel(calculateDelayRisk(tasks)),
+                        calculateEfficiency(tasks, completed)
+                ));
+            }
+        } else if (isMember) {
+            List<Task> memberTasks = getAllTasksForMember(user);
+            if (memberTasks.isEmpty()) {
+                context.append("No tienes tareas asignadas.\n");
+                return context.toString();
+            }
+
+            long total = memberTasks.size();
+            long completed = memberTasks.stream()
+                    .filter(t -> STATUS_DONE.equals(t.getStatus().toString()))
+                    .count();
+            long inProgress = memberTasks.stream()
+                    .filter(t -> STATUS_IN_PROGRESS.equals(t.getStatus().toString()))
+                    .count();
+            long toDo = memberTasks.stream()
+                    .filter(t -> STATUS_TO_DO.equals(t.getStatus().toString()))
+                    .count();
+            long delayed = memberTasks.stream()
+                    .filter(t -> {
+                        Date endDate = t.getEndDate();
+                        if (endDate == null) return false;
+                        LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                        return endLocalDate.isBefore(LocalDate.now()) && !STATUS_DONE.equals(t.getStatus().toString());
+                    })
+                    .count();
+
+            context.append(String.format("""
+            Tus tareas:
+              - Total: %d
+              - Completadas: %d (%.0f%%)
+              - En progreso: %d
+              - Pendientes: %d
+              - Atrasadas: %d
+            """,
+                    total,
+                    completed,
+                    total > 0 ? (double) completed / total * 100 : 0,
+                    inProgress,
+                    toDo,
+                    delayed
+            ));
+        }
+
+        return context.toString();
+    }
+
+    private String interpretProjectStatus(ProjectStatus status) {
+        if (status == null) return "Sin estado definido";
+
+        switch (status) {
+            case PLANNED:
+                return "Planificado";
+            case IN_PROGRESS:
+                return "En progreso";
+            case COMPLETED:
+                return "Completado";
+            case CANCELLED:
+                return "Cancelado";
+            default:
+                return status.name().toLowerCase().replace("_", " ");
+        }
+    }
+
+    private String interpretRiskLevel(double risk) {
+        if (risk >= 70) {
+            return "Alto - Se recomienda tomar acciones inmediatas";
+        } else if (risk >= 40) {
+            return "Medio - Monitorear de cerca";
+        } else {
+            return "Bajo - El proyecto va bien encaminado";
+        }
+    }
+
+    private String interpretPriority(String priority) {
+        if (priority == null) return "Sin prioridad";
+
+        switch (priority.toUpperCase()) {
+            case "HIGH":
+                return "Alta";
+            case "MEDIUM":
+                return "Media";
+            case "LOW":
+                return "Baja";
+            default:
+                return priority.toLowerCase();
+        }
+    }
+
+    private String interpretTaskStatus(String status) {
+        if (status == null) return "Sin estado";
+
+        switch (status) {
+            case "TO_DO":
+                return "Pendiente";
+            case "IN_PROGRESS":
+                return "En progreso";
+            case "DONE":
+                return "Completada";
+            default:
+                return status.toLowerCase().replace("_", " ");
+        }
+    }
+
+    private String buildTasksContext(User user) {
+        List<Task> tasks = getAllTasksForMember(user);
+        if (tasks.isEmpty()) {
+            return "No tienes tareas asignadas actualmente.";
+        }
+
+        StringBuilder context = new StringBuilder("Tus tareas:\n");
+
+        List<Task> toDo = tasks.stream()
+                .filter(t -> STATUS_TO_DO.equals(t.getStatus().toString()))
+                .collect(Collectors.toList());
+        List<Task> inProgress = tasks.stream()
+                .filter(t -> STATUS_IN_PROGRESS.equals(t.getStatus().toString()))
+                .collect(Collectors.toList());
+        List<Task> done = tasks.stream()
+                .filter(t -> STATUS_DONE.equals(t.getStatus().toString()))
+                .collect(Collectors.toList());
+
+        if (!toDo.isEmpty()) {
+            context.append("\nPENDIENTES:\n");
+            toDo.forEach(t -> {
+                String priority = interpretPriority(t.getPriority().toString());
+                String endDate = t.getEndDate() != null ?
+                        t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate().toString() :
+                        "Sin fecha definida";
+                context.append(String.format("  - %s (Prioridad: %s, Vence: %s)\n",
+                        t.getTitle(),
+                        priority,
+                        endDate
+                ));
+            });
+        }
+
+        if (!inProgress.isEmpty()) {
+            context.append("\nEN PROGRESO:\n");
+            inProgress.forEach(t -> {
+                String priority = interpretPriority(t.getPriority().toString());
+                String endDate = t.getEndDate() != null ?
+                        t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate().toString() :
+                        "Sin fecha definida";
+                context.append(String.format("  - %s (Prioridad: %s, Vence: %s)\n",
+                        t.getTitle(),
+                        priority,
+                        endDate
+                ));
+            });
+        }
+
+        if (!done.isEmpty()) {
+            context.append("\nCOMPLETADAS:\n");
+            done.forEach(t -> context.append(String.format("  - %s ✓\n", t.getTitle())));
+        }
+
+        return context.toString();
+    }
+
+    private String buildRisksContext(User user, boolean isLeader) {
+        StringBuilder context = new StringBuilder();
+
+        if (isLeader) {
+            List<Project> projects = projectRepository.findByLeaderId(user.getId());
+            if (projects.isEmpty()) {
+                return "No tienes proyectos como líder para analizar riesgos.";
+            }
+
+            for (Project project : projects) {
+                List<Task> tasks = taskRepository.findByProjectId(project.getId());
+                double risk = calculateDelayRisk(tasks);
+                String riskDescription = interpretRiskLevel(risk);
+
+                long delayed = tasks.stream()
+                        .filter(t -> {
+                            Date endDate = t.getEndDate();
+                            if (endDate == null) return false;
+                            LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                            return endLocalDate.isBefore(LocalDate.now()) && !STATUS_DONE.equals(t.getStatus().toString());
+                        })
+                        .count();
+
+                context.append(String.format("""
+                Proyecto: %s
+                  - Nivel de riesgo: %s
+                  - Tareas atrasadas: %d
+                \n""",
+                        project.getName(),
+                        riskDescription,
+                        delayed
+                ));
+
+                if (delayed > 0) {
+                    context.append("  Tareas atrasadas:\n");
+                    tasks.stream()
+                            .filter(t -> {
+                                Date endDate = t.getEndDate();
+                                if (endDate == null) return false;
+                                LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                                return endLocalDate.isBefore(LocalDate.now()) && !STATUS_DONE.equals(t.getStatus().toString());
+                            })
+                            .forEach(t -> {
+                                long days = ChronoUnit.DAYS.between(
+                                        t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate(),
+                                        LocalDate.now()
+                                );
+                                String priority = interpretPriority(t.getPriority().toString());
+                                context.append(String.format("    - %s (Atrasada %d días, Prioridad: %s)\n",
+                                        t.getTitle(),
+                                        days,
+                                        priority
+                                ));
+                            });
+                }
+            }
+        } else {
+            List<Task> tasks = getAllTasksForMember(user);
+            if (tasks.isEmpty()) {
+                return "No tienes tareas asignadas para analizar riesgos.";
+            }
+
+            long delayed = tasks.stream()
+                    .filter(t -> {
+                        Date endDate = t.getEndDate();
+                        if (endDate == null) return false;
+                        LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                        return endLocalDate.isBefore(LocalDate.now()) && !STATUS_DONE.equals(t.getStatus().toString());
+                    })
+                    .count();
+
+            if (delayed == 0) {
+                context.append("¡Excelente! No tienes tareas atrasadas. Sigue así.\n");
+            } else {
+                context.append(String.format("Tienes %d tareas atrasadas:\n", delayed));
+                tasks.stream()
+                        .filter(t -> {
+                            Date endDate = t.getEndDate();
+                            if (endDate == null) return false;
+                            LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                            return endLocalDate.isBefore(LocalDate.now()) && !STATUS_DONE.equals(t.getStatus().toString());
+                        })
+                        .forEach(t -> {
+                            long days = ChronoUnit.DAYS.between(
+                                    t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate(),
+                                    LocalDate.now()
+                            );
+                            String priority = interpretPriority(t.getPriority().toString());
+                            context.append(String.format("  - %s (Atrasada %d días, Prioridad: %s)\n",
+                                    t.getTitle(),
+                                    days,
+                                    priority
+                            ));
+                        });
+            }
+        }
+
+        return context.toString();
+    }
+
+    private String buildDeadlinesContext(User user, boolean isLeader) {
+        StringBuilder context = new StringBuilder();
+        LocalDate now = LocalDate.now();
+        LocalDate weekLater = now.plusDays(7);
+
+        if (isLeader) {
+            List<Project> projects = projectRepository.findByLeaderId(user.getId());
+            if (projects.isEmpty()) {
+                return "No tienes proyectos como líder.";
+            }
+
+            for (Project project : projects) {
+                List<Task> tasks = taskRepository.findByProjectId(project.getId());
+                context.append(String.format("Próximas fechas límite en '%s':\n", project.getName()));
+
+                List<Task> upcomingTasks = tasks.stream()
+                        .filter(t -> {
+                            Date endDate = t.getEndDate();
+                            if (endDate == null) return false;
+                            LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                            return endLocalDate.isAfter(now) && endLocalDate.isBefore(weekLater)
+                                    && !STATUS_DONE.equals(t.getStatus().toString());
+                        })
+                        .sorted((a, b) -> a.getEndDate().compareTo(b.getEndDate()))
+                        .collect(Collectors.toList());
+
+                if (upcomingTasks.isEmpty()) {
+                    context.append("  No hay tareas con fechas límite próximas en los próximos 7 días.\n");
+                } else {
+                    for (Task t : upcomingTasks) {
+                        LocalDate endDate = t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                        long days = ChronoUnit.DAYS.between(now, endDate);
+                        String priority = interpretPriority(t.getPriority().toString());
+                        context.append(String.format("  - %s (Vence en %d días, Prioridad: %s)\n",
+                                t.getTitle(),
+                                days,
+                                priority
+                        ));
+                    }
+                }
+
+                List<Task> delayedTasks = tasks.stream()
+                        .filter(t -> {
+                            Date endDate = t.getEndDate();
+                            if (endDate == null) return false;
+                            LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                            return endLocalDate.isBefore(now) && !STATUS_DONE.equals(t.getStatus().toString());
+                        })
+                        .collect(Collectors.toList());
+
+                if (!delayedTasks.isEmpty()) {
+                    context.append("\n  ⚠️ Tareas ATRASADAS:\n");
+                    for (Task t : delayedTasks) {
+                        long days = ChronoUnit.DAYS.between(
+                                t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate(),
+                                now
+                        );
+                        String priority = interpretPriority(t.getPriority().toString());
+                        context.append(String.format("    - %s (Atrasada %d días, Prioridad: %s)\n",
+                                t.getTitle(),
+                                days,
+                                priority
+                        ));
+                    }
+                }
+            }
+        } else {
+            List<Task> tasks = getAllTasksForMember(user);
+            if (tasks.isEmpty()) {
+                return "No tienes tareas asignadas.";
+            }
+
+            List<Task> upcomingTasks = tasks.stream()
+                    .filter(t -> {
+                        Date endDate = t.getEndDate();
+                        if (endDate == null) return false;
+                        LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                        return endLocalDate.isAfter(now) && endLocalDate.isBefore(weekLater)
+                                && !STATUS_DONE.equals(t.getStatus().toString());
+                    })
+                    .sorted((a, b) -> a.getEndDate().compareTo(b.getEndDate()))
+                    .collect(Collectors.toList());
+
+            if (upcomingTasks.isEmpty()) {
+                context.append("No tienes tareas con fechas límite próximas en los próximos 7 días.\n");
+            } else {
+                context.append("Próximas fechas límite:\n");
+                for (Task t : upcomingTasks) {
+                    LocalDate endDate = t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                    long days = ChronoUnit.DAYS.between(now, endDate);
+                    String priority = interpretPriority(t.getPriority().toString());
+                    context.append(String.format("  - %s (Vence en %d días, Prioridad: %s)\n",
+                            t.getTitle(),
+                            days,
+                            priority
+                    ));
+                }
+            }
+
+            List<Task> delayedTasks = tasks.stream()
+                    .filter(t -> {
+                        Date endDate = t.getEndDate();
+                        if (endDate == null) return false;
+                        LocalDate endLocalDate = endDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                        return endLocalDate.isBefore(now) && !STATUS_DONE.equals(t.getStatus().toString());
+                    })
+                    .collect(Collectors.toList());
+
+            if (!delayedTasks.isEmpty()) {
+                context.append("\n⚠️ Tareas ATRASADAS:\n");
+                for (Task t : delayedTasks) {
+                    long days = ChronoUnit.DAYS.between(
+                            t.getEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate(),
+                            now
+                    );
+                    String priority = interpretPriority(t.getPriority().toString());
+                    context.append(String.format("  - %s (Atrasada %d días, Prioridad: %s)\n",
+                            t.getTitle(),
+                            days,
+                            priority
+                    ));
+                }
+            }
+        }
+
+        return context.toString();
+    }
+
+    private String buildTeamLoadContext(User user, boolean isLeader) {
+        if (!isLeader) {
+            return "Solo los líderes pueden ver la carga del equipo. Como miembro, puedes consultar a tu líder sobre la distribución de trabajo.";
+        }
+
+        List<Project> projects = projectRepository.findByLeaderId(user.getId());
+        if (projects.isEmpty()) {
+            return "No tienes proyectos como líder.";
+        }
+
+        StringBuilder context = new StringBuilder("Carga de trabajo del equipo:\n");
+
+        for (Project project : projects) {
+            List<Task> tasks = taskRepository.findByProjectId(project.getId());
+            context.append(String.format("\nProyecto: %s\n", project.getName()));
+
+            Set<User> projectMembers = project.getMembers();
+
+            if (projectMembers.isEmpty()) {
+                context.append("  No hay miembros en este proyecto.\n");
+                continue;
+            }
+
+            for (User member : projectMembers) {
+                List<Task> memberTasks = tasks.stream()
+                        .filter(task -> task.getAssignedUsers() != null && task.getAssignedUsers().contains(member))
+                        .collect(Collectors.toList());
+
+                long total = memberTasks.size();
+                long completed = memberTasks.stream()
+                        .filter(t -> STATUS_DONE.equals(t.getStatus().toString()))
+                        .count();
+                long inProgress = memberTasks.stream()
+                        .filter(t -> STATUS_IN_PROGRESS.equals(t.getStatus().toString()))
+                        .count();
+                long toDo = memberTasks.stream()
+                        .filter(t -> STATUS_TO_DO.equals(t.getStatus().toString()))
+                        .count();
+
+                String loadLevel = total > 5 ? "SOBRECARGADO" : total >= 3 ? "NORMAL" : "BAJA CARGA";
+
+                context.append(String.format("""
+                %s %s: %d tareas [%d TO_DO, %d IN_PROGRESS, %d DONE] - %s
+                """,
+                        member.getName(),
+                        member.getLastName(),
+                        total,
+                        toDo,
+                        inProgress,
+                        completed,
+                        loadLevel
+                ));
+            }
+        }
+
+        return context.toString();
+    }
+
+    private boolean containsAny(String text, String... keywords) {
+        for (String keyword : keywords) {
+            if (text.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String cleanResponse(String response) {
         if (response == null) return "";
         return response.trim()
                 .replaceAll("^[•\\-\\*\\d+\\).]\\s*", "")
-                .replaceAll("\n.*", "")
                 .replaceAll("^\"|\"$", "")
                 .replaceAll("RECOMENDACION:", "")
                 .replaceAll("RECOMENDACIÓN:", "")
                 .replaceAll("RESUMEN:", "")
                 .replaceAll("SUGERENCIAS:", "")
+                .replaceAll("INSTRUCCIONES:", "")
+                .replaceAll("\\*\\*", "")
+                .replaceAll("```", "")
+                .replaceAll("`", "")
+                .replaceAll("PLANNED", "Planificado")
+                .replaceAll("TO_DO", "Pendiente")
+                .replaceAll("DONE", "Completada")
+                .replaceAll("IN_PROGRESS", "En progreso")
+                .replaceAll("\\s+", " ")
                 .trim();
     }
 

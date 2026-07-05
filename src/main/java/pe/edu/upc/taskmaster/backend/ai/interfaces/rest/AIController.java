@@ -13,9 +13,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
+import pe.edu.upc.taskmaster.backend.ai.domain.model.queries.GetChatbotResponseQuery;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.queries.GetLeaderDashboardQuery;
 import pe.edu.upc.taskmaster.backend.ai.domain.model.queries.GetMemberDashboardQuery;
 import pe.edu.upc.taskmaster.backend.ai.domain.services.AIQueryService;
+import pe.edu.upc.taskmaster.backend.ai.interfaces.rest.resources.ChatMessageRequest;
+import pe.edu.upc.taskmaster.backend.ai.interfaces.rest.resources.ChatMessageResponse;
 import pe.edu.upc.taskmaster.backend.ai.interfaces.rest.resources.DashboardResponseResource;
 import pe.edu.upc.taskmaster.backend.ai.interfaces.rest.resources.MemberDashboardResponseResource;
 import pe.edu.upc.taskmaster.backend.ai.interfaces.rest.resources.WeeklySummaryResource;
@@ -32,9 +35,9 @@ import java.util.Collections;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/v1/ai/dashboard")
+@RequestMapping("/api/v1/ai")
 @CrossOrigin(origins = "*")
-@Tag(name = "AI Dashboard", description = "AI-Powered Endpoints")
+@Tag(name = "AI", description = "AI-Powered Endpoints")
 @Slf4j
 @RequiredArgsConstructor
 public class AIController {
@@ -92,7 +95,48 @@ public class AIController {
         }
     }
 
-    @GetMapping("/leader")
+    @PostMapping("/chatbot/message")
+    @Operation(
+            summary = "Send a message to the AI chatbot",
+            description = "Sends a message to the AI chatbot and receives a response. The chatbot only responds about project management topics."
+    )
+    @ApiResponses(value = {
+            @ApiResponse(
+                    responseCode = "200",
+                    description = "Response generated successfully",
+                    content = @Content(mediaType = "application/json", schema = @Schema(implementation = ChatMessageResponse.class))
+            ),
+            @ApiResponse(responseCode = "400", description = "Invalid message"),
+            @ApiResponse(responseCode = "401", description = "User not authenticated"),
+            @ApiResponse(responseCode = "500", description = "Error generating response")
+    })
+    public ResponseEntity<ChatMessageResponse> sendChatMessage(@RequestBody ChatMessageRequest request) {
+        try {
+            Long userId = getAuthenticatedUserId();
+
+            User user = userRepository.findById(userId)
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            if (request.message() == null || request.message().isBlank()) {
+                return ResponseEntity.badRequest()
+                        .body(new ChatMessageResponse("El mensaje no puede estar vacío.", "ERROR"));
+            }
+
+            String response = aiQueryService.handle(new GetChatbotResponseQuery(userId, request.message()));
+
+            return ResponseEntity.ok(new ChatMessageResponse(response, "SUCCESS"));
+
+        } catch (RuntimeException e) {
+            log.error("Error in chatbot: {}", e.getMessage());
+            if (e.getMessage().contains("User not authenticated")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            }
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(new ChatMessageResponse("Error al procesar el mensaje: " + e.getMessage(), "ERROR"));
+        }
+    }
+
+    @GetMapping("/dashboard/leader")
     @Operation(
             summary = "Get leader dashboard",
             description = "Retrieves an AI-powered dashboard for the authenticated leader. The leader ID is obtained from the JWT token."
@@ -151,7 +195,7 @@ public class AIController {
         }
     }
 
-    @GetMapping("/member")
+    @GetMapping("/dashboard/member")
     @Operation(
             summary = "Get member dashboard",
             description = "Retrieves an AI-powered weekly dashboard for the authenticated member. The member ID is obtained from the JWT token."
