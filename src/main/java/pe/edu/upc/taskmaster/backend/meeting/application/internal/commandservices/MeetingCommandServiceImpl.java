@@ -4,6 +4,7 @@ import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 import pe.edu.upc.taskmaster.backend.iam.domain.model.valueobjects.Roles;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.persistence.jpa.repositories.UserRepository;
+import pe.edu.upc.taskmaster.backend.meeting.application.external.GoogleCalendarService;
 import pe.edu.upc.taskmaster.backend.meeting.domain.model.aggregates.Meeting;
 import pe.edu.upc.taskmaster.backend.meeting.domain.model.commands.CreateMeetingCommand;
 import pe.edu.upc.taskmaster.backend.meeting.domain.model.commands.DeleteMeetingCommand;
@@ -15,6 +16,7 @@ import pe.edu.upc.taskmaster.backend.notification.domain.services.NotificationCo
 
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -23,13 +25,16 @@ public class MeetingCommandServiceImpl implements MeetingCommandService {
     private final MeetingRepository meetingRepository;
     private final UserRepository userRepository;
     private final NotificationCommandService notificationCommandService;
+    private final GoogleCalendarService googleCalendarService;
 
     public MeetingCommandServiceImpl(MeetingRepository meetingRepository,
                                      UserRepository userRepository,
-                                     NotificationCommandService notificationCommandService) {
+                                     NotificationCommandService notificationCommandService,
+                                     GoogleCalendarService googleCalendarService) {
         this.meetingRepository = meetingRepository;
         this.userRepository = userRepository;
         this.notificationCommandService = notificationCommandService;
+        this.googleCalendarService = googleCalendarService;
     }
 
     @Override
@@ -59,6 +64,19 @@ public class MeetingCommandServiceImpl implements MeetingCommandService {
 
         var meeting = new Meeting(createMeetingCommand);
         meeting.replaceParticipants(new HashSet<>(participants));
+
+        List<String> participantEmails = participants.stream()
+                .map(user -> user.getEmail())
+                .toList();
+
+        var meetLink = googleCalendarService.createMeetLink(
+                createMeetingCommand.title(),
+                createMeetingCommand.description(),
+                createMeetingCommand.startTime(),
+                createMeetingCommand.endTime(),
+                participantEmails
+        );
+        meeting.setMeetLink(meetLink);
 
         var savedMeeting = meetingRepository.save(meeting);
 

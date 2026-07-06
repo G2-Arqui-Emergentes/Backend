@@ -8,6 +8,7 @@ import org.springframework.security.authentication.dao.DaoAuthenticationProvider
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -115,11 +116,14 @@ public class WebSecurityConfiguration {
     } ));
     http.csrf(csrfConfigurer -> csrfConfigurer.disable())
         .exceptionHandling(exceptionHandling -> exceptionHandling.authenticationEntryPoint(unauthorizedRequestHandler))
-        .sessionManagement(customizer -> customizer.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .sessionManagement(customizer -> customizer.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
+        .oauth2Login(Customizer.withDefaults())
         .authorizeHttpRequests(
             authorizeRequests -> authorizeRequests
                     .requestMatchers(
                             "/api/v1/authentication/**",
+                            "/oauth2/**",
+                            "/login/oauth2/**",
                             "/v3/api-docs/**",
                             "/swagger-ui.html",
                             "/swagger-ui/**",

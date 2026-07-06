@@ -73,7 +73,7 @@ public class MeetingController {
 
             var meetingResource = MeetingResourceFromEntityAssembler.toResourceFromEntity(createdMeeting.get());
             return ResponseEntity.status(HttpStatus.CREATED).body(meetingResource);
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException | IllegalStateException e) {
             return ResponseEntity.badRequest().build();
         }
     }
