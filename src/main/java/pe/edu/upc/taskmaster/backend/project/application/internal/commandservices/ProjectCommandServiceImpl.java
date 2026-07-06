@@ -1,6 +1,8 @@
 package pe.edu.upc.taskmaster.backend.project.application.internal.commandservices;
 
 import jakarta.transaction.Transactional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import pe.edu.upc.taskmaster.backend.iam.domain.model.valueobjects.Roles;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.persistence.jpa.repositories.UserRepository;
@@ -10,6 +12,7 @@ import pe.edu.upc.taskmaster.backend.project.domain.model.valueobjects.ProjectCo
 import pe.edu.upc.taskmaster.backend.project.domain.services.ProjectCommandService;
 import pe.edu.upc.taskmaster.backend.project.infrastructure.persistence.jpa.repositories.ProjectRepository;
 import pe.edu.upc.taskmaster.backend.meeting.application.external.GoogleCalendarService;
+import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.GoogleAccountConnectionService;
 import pe.edu.upc.taskmaster.backend.notification.domain.services.NotificationCommandService;
 import pe.edu.upc.taskmaster.backend.notification.domain.model.commands.CreateNotificationCommand;
 
@@ -18,18 +21,23 @@ import java.util.Optional;
 @Service
 public class ProjectCommandServiceImpl implements ProjectCommandService {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(ProjectCommandServiceImpl.class);
+
     private final ProjectRepository projectRepository;
     private final UserRepository userRepository;
     private final NotificationCommandService notificationCommandService;
     private final GoogleCalendarService googleCalendarService;
+    private final GoogleAccountConnectionService googleAccountConnectionService;
 
     public ProjectCommandServiceImpl(ProjectRepository projectRepository, UserRepository userRepository,
                                      NotificationCommandService notificationCommandService,
-                                     GoogleCalendarService googleCalendarService) {
+                                     GoogleCalendarService googleCalendarService,
+                                     GoogleAccountConnectionService googleAccountConnectionService) {
         this.projectRepository = projectRepository;
         this.userRepository = userRepository;
         this.notificationCommandService = notificationCommandService;
         this.googleCalendarService = googleCalendarService;
+        this.googleAccountConnectionService = googleAccountConnectionService;
     }
 
     @Override
@@ -51,7 +59,11 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
 
         var project=new Project(createProjectCommand);
         projectRepository.save(project);
-        syncProjectToGoogleCalendar(project);
+        try {
+            syncProjectToGoogleCalendar(project);
+        } catch (Exception e) {
+            LOGGER.warn("Google Calendar sync skipped for project {}: {}", project.getId(), e.getMessage());
+        }
 
         return project.getId();
     }
@@ -70,7 +82,11 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
         var updatedProject=project.updateProject(updateProjectCommand);
 
         projectRepository.save(updatedProject);
-        syncProjectToGoogleCalendar(updatedProject);
+        try {
+            syncProjectToGoogleCalendar(updatedProject);
+        } catch (Exception e) {
+            LOGGER.warn("Google Calendar sync skipped for project {}: {}", updatedProject.getId(), e.getMessage());
+        }
 
         return  Optional.of(updatedProject);
     }
@@ -88,8 +104,12 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
                 user.removeFromProject(projectId);
                 userRepository.save(user);
             });
-            deleteProjectCalendarEvent(project);
-            project.getTasks().forEach(task -> deleteTaskCalendarEvents(task.getId(), project.getLeaderId(), task.getAssignedUsers().stream().map(u -> u.getId()).toList()));
+            try {
+                deleteProjectCalendarEvent(project);
+                project.getTasks().forEach(task -> deleteTaskCalendarEvents(task.getId(), project.getLeaderId(), task.getAssignedUsers().stream().map(u -> u.getId()).toList()));
+            } catch (Exception e) {
+                LOGGER.warn("Google Calendar cleanup skipped for project {}: {}", projectId, e.getMessage());
+            }
             projectRepository.deleteById(projectId);
         } catch (Exception e) {
             throw new RuntimeException("Error while deleting project: " + e.getMessage(), e);
@@ -235,6 +255,11 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
             return;
         }
 
+        var status = googleAccountConnectionService.getStatus(project.getLeaderId());
+        if (!status.connected()) {
+            return;
+        }
+
         String eventId = buildProjectEventId(project.getId(), project.getLeaderId());
         String title = "Vence proyecto: " + project.getName();
         String description = project.getDescription();
@@ -243,6 +268,10 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
 
     private void deleteProjectCalendarEvent(Project project) {
         if (project == null || project.getId() == null || project.getLeaderId() == null) {
+            return;
+        }
+        var status = googleAccountConnectionService.getStatus(project.getLeaderId());
+        if (!status.connected()) {
             return;
         }
         googleCalendarService.deleteEvent(project.getLeaderId(), buildProjectEventId(project.getId(), project.getLeaderId()));
@@ -254,7 +283,10 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
         }
 
         if (leaderId != null) {
-            googleCalendarService.deleteEvent(leaderId, "task-" + taskId + "-user-" + leaderId);
+            var status = googleAccountConnectionService.getStatus(leaderId);
+            if (status.connected()) {
+                googleCalendarService.deleteEvent(leaderId, "task-" + taskId + "-user-" + leaderId);
+            }
         }
 
         if (assignedUserIds == null) {
@@ -263,7 +295,11 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
 
         assignedUserIds.stream()
                 .filter(userId -> userId != null && !userId.equals(leaderId))
-                .forEach(userId -> googleCalendarService.deleteEvent(userId, "task-" + taskId + "-user-" + userId));
+                .forEach(userId -> {
+                    if (googleAccountConnectionService.getStatus(userId).connected()) {
+                        googleCalendarService.deleteEvent(userId, "task-" + taskId + "-user-" + userId);
+                    }
+                });
     }
 
     private String buildProjectEventId(Long projectId, Long leaderId) {
