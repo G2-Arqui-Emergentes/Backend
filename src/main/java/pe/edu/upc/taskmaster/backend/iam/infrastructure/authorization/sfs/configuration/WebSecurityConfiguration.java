@@ -13,6 +13,7 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
 import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
+import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.AuthenticationEntryPoint;
@@ -123,7 +124,32 @@ public class WebSecurityConfiguration {
       additionalParameters.put("include_granted_scopes", "true");
       builder.additionalParameters(additionalParameters);
     });
-    return resolver;
+    return new OAuth2AuthorizationRequestResolver() {
+      @Override
+      public OAuth2AuthorizationRequest resolve(jakarta.servlet.http.HttpServletRequest request) {
+        return customizeState(resolver.resolve(request), request);
+      }
+
+      @Override
+      public OAuth2AuthorizationRequest resolve(jakarta.servlet.http.HttpServletRequest request, String clientRegistrationId) {
+        return customizeState(resolver.resolve(request, clientRegistrationId), request);
+      }
+
+      private OAuth2AuthorizationRequest customizeState(OAuth2AuthorizationRequest authorizationRequest, jakarta.servlet.http.HttpServletRequest request) {
+        if (authorizationRequest == null) {
+          return null;
+        }
+
+        String requestedState = request.getParameter("state");
+        if (requestedState == null || requestedState.isBlank()) {
+          return authorizationRequest;
+        }
+
+        return OAuth2AuthorizationRequest.from(authorizationRequest)
+                .state(requestedState)
+                .build();
+      }
+    };
   }
 
   /**

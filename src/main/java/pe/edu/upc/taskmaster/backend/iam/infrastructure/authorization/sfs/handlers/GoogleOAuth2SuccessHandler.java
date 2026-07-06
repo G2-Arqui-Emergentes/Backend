@@ -3,7 +3,6 @@ package pe.edu.upc.taskmaster.backend.iam.infrastructure.authorization.sfs.handl
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import jakarta.servlet.http.HttpSession;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
@@ -13,6 +12,7 @@ import org.springframework.security.oauth2.core.user.OAuth2User;
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 import org.springframework.stereotype.Component;
 import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.GoogleAccountConnectionService;
+import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.GoogleOAuthStateService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,13 +28,16 @@ public class GoogleOAuth2SuccessHandler implements AuthenticationSuccessHandler 
 
     private final OAuth2AuthorizedClientService authorizedClientService;
     private final GoogleAccountConnectionService googleAccountConnectionService;
+    private final GoogleOAuthStateService googleOAuthStateService;
     private final String frontendOrigin;
 
     public GoogleOAuth2SuccessHandler(OAuth2AuthorizedClientService authorizedClientService,
                                       GoogleAccountConnectionService googleAccountConnectionService,
+                                      GoogleOAuthStateService googleOAuthStateService,
                                       @Value("${app.frontend-url:http://localhost:5173}") String frontendUrl) {
         this.authorizedClientService = authorizedClientService;
         this.googleAccountConnectionService = googleAccountConnectionService;
+        this.googleOAuthStateService = googleOAuthStateService;
         this.frontendOrigin = normalizeOrigin(frontendUrl);
     }
 
@@ -54,21 +57,11 @@ public class GoogleOAuth2SuccessHandler implements AuthenticationSuccessHandler 
 
                 if (authorizedClient != null) {
                     OAuth2User principal = oauth2Authentication.getPrincipal();
-                    HttpSession session = request.getSession(false);
-                    Long userId = null;
-                    if (session != null) {
-                        Object linkedUserId = session.getAttribute("google_connection_user_id");
-                        if (linkedUserId instanceof Long value) {
-                            userId = value;
-                        } else if (linkedUserId instanceof Integer value) {
-                            userId = value.longValue();
-                        }
-                        session.removeAttribute("google_connection_user_id");
-                    }
-
+                    String state = request.getParameter("state");
+                    Long userId = googleOAuthStateService.consumeUserId(state);
                     if (userId == null) {
-                        LOGGER.warn("Google OAuth callback completed without TaskMaster session for principal {}", oauth2Authentication.getName());
-                        message = "Google authorization completed, but the TaskMaster session was not found.";
+                        LOGGER.warn("Google OAuth callback completed without valid state for principal {}", oauth2Authentication.getName());
+                        message = "Google authorization completed, but the OAuth state was not found or expired.";
                     } else {
                         String googleEmail = principal.getAttribute("email");
                         var accessToken = authorizedClient.getAccessToken();

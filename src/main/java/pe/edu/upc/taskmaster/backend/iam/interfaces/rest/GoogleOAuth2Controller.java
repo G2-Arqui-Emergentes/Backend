@@ -1,6 +1,5 @@
 package pe.edu.upc.taskmaster.backend.iam.interfaces.rest;
 
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.authorization.sfs.model.UserDetailsImpl;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.tokens.jwt.BearerTokenService;
 import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.GoogleAccountConnectionService;
+import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.GoogleOAuthStateService;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -24,20 +24,22 @@ import java.util.Map;
 public class GoogleOAuth2Controller {
 
     private final GoogleAccountConnectionService googleAccountConnectionService;
+    private final GoogleOAuthStateService googleOAuthStateService;
     private final BearerTokenService tokenService;
     private final UserDetailsService userDetailsService;
 
     public GoogleOAuth2Controller(GoogleAccountConnectionService googleAccountConnectionService,
+                                  GoogleOAuthStateService googleOAuthStateService,
                                   BearerTokenService tokenService,
                                   @org.springframework.beans.factory.annotation.Qualifier("defaultUserDetailsService") UserDetailsService userDetailsService) {
         this.googleAccountConnectionService = googleAccountConnectionService;
+        this.googleOAuthStateService = googleOAuthStateService;
         this.tokenService = tokenService;
         this.userDetailsService = userDetailsService;
     }
 
     @GetMapping("/connect")
-    public void connect(HttpServletRequest request,
-                        HttpServletResponse response,
+    public void connect(HttpServletResponse response,
                         @AuthenticationPrincipal UserDetailsImpl userDetails,
                         @RequestParam(value = "token", required = false) String token) throws IOException {
         Long userId = resolveUserId(userDetails, token);
@@ -46,9 +48,8 @@ public class GoogleOAuth2Controller {
             return;
         }
 
-        var session = request.getSession(true);
-        session.setAttribute("google_connection_user_id", userId);
-        response.sendRedirect("/oauth2/authorization/google");
+        String state = googleOAuthStateService.createState(userId);
+        response.sendRedirect("/oauth2/authorization/google?state=" + state);
     }
 
     @GetMapping("/status")
