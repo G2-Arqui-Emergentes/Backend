@@ -65,7 +65,7 @@ public class GoogleOAuth2SuccessHandler implements AuthenticationSuccessHandler 
                         googleEmail != null ? googleEmail : oauth2Authentication.getName(),
                         accessToken.getTokenValue(),
                         refreshToken != null ? refreshToken.getTokenValue() : null,
-                        accessToken.getExpiresAt() != null ? accessToken.getExpiresAt().toInstant() : Instant.now().plusSeconds(3600)
+                        accessToken.getExpiresAt() != null ? accessToken.getExpiresAt() : Instant.now().plusSeconds(3600)
                 );
             }
         }
