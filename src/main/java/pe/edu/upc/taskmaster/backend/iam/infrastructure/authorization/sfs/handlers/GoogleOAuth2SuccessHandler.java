@@ -71,7 +71,27 @@ public class GoogleOAuth2SuccessHandler implements AuthenticationSuccessHandler 
         }
 
         response.setStatus(HttpServletResponse.SC_OK);
-        response.setContentType("text/plain");
-        response.getWriter().write("Google account connected");
+        response.setContentType("text/html;charset=UTF-8");
+        response.getWriter().write("""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                  <title>Google Calendar Connected</title>
+                </head>
+                <body>
+                  <script>
+                    if (window.opener) {
+                      window.opener.postMessage(
+                        { type: 'GOOGLE_CONNECTED' },
+                        'http://localhost:5173'
+                      );
+                    }
+                    window.close();
+                  </script>
+                  <p>Google Calendar connected successfully. You can close this window.</p>
+                </body>
+                </html>
+                """);
+        response.getWriter().flush();
     }
 }
