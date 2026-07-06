@@ -137,9 +137,13 @@ public class WebSecurityConfiguration {
   public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
     http.cors(corsConfigurer -> corsConfigurer.configurationSource( request -> {
       var cors = new CorsConfiguration();
-      cors.setAllowedOrigins(List.of("*"));
-      cors.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE"));
-      cors.setAllowedHeaders(List.of("*"));
+      cors.setAllowedOrigins(List.of(
+              "http://localhost:5173",
+              "https://taskmaster-web-application.vercel.app"
+      ));
+      cors.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+      cors.setAllowedHeaders(List.of("Authorization", "Content-Type", "Accept", "X-Requested-With"));
+      cors.setAllowCredentials(true);
       return cors;
     } ));
     http.csrf(csrfConfigurer -> csrfConfigurer.disable())
@@ -152,6 +156,7 @@ public class WebSecurityConfiguration {
         .authorizeHttpRequests(
             authorizeRequests -> authorizeRequests
                     .requestMatchers(
+                            "/api/v1/google/connect",
                             "/api/v1/authentication/**",
                             "/oauth2/**",
                             "/login/oauth2/**",
