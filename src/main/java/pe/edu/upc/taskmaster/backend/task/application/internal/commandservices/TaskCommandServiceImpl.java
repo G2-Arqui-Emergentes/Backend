@@ -3,6 +3,7 @@ package pe.edu.upc.taskmaster.backend.task.application.internal.commandservices;
 import org.springframework.stereotype.Service;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.persistence.jpa.repositories.UserRepository;
 import pe.edu.upc.taskmaster.backend.project.infrastructure.persistence.jpa.repositories.ProjectRepository;
+import pe.edu.upc.taskmaster.backend.meeting.application.external.GoogleCalendarService;
 import pe.edu.upc.taskmaster.backend.task.domain.model.aggregates.Task;
 import pe.edu.upc.taskmaster.backend.task.domain.model.commands.*;
 import pe.edu.upc.taskmaster.backend.task.domain.services.TaskCommandService;
@@ -14,6 +15,9 @@ import java.util.Optional;
 import java.util.Date;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 public class TaskCommandServiceImpl implements TaskCommandService {
@@ -22,6 +26,7 @@ public class TaskCommandServiceImpl implements TaskCommandService {
     private final ProjectRepository projectRepository;
     private final UserRepository userRepository;
     private final NotificationCommandService notificationCommandService;
+    private final GoogleCalendarService googleCalendarService;
 
 
     private static final long DUE_SOON_THRESHOLD_HOURS = 24;
@@ -29,11 +34,13 @@ public class TaskCommandServiceImpl implements TaskCommandService {
     public TaskCommandServiceImpl(TaskRepository taskRepository,
                                   ProjectRepository projectRepository,
                                   UserRepository userRepository,
-                                  NotificationCommandService notificationCommandService) {
+                                  NotificationCommandService notificationCommandService,
+                                  GoogleCalendarService googleCalendarService) {
         this.taskRepository = taskRepository;
         this.projectRepository = projectRepository;
         this.userRepository = userRepository;
         this.notificationCommandService = notificationCommandService;
+        this.googleCalendarService = googleCalendarService;
     }
 
     @Override
@@ -77,6 +84,11 @@ public class TaskCommandServiceImpl implements TaskCommandService {
         } catch (Exception ignored) {
         }
 
+        try {
+            syncTaskToGoogleCalendar(savedTask);
+        } catch (Exception ignored) {
+        }
+
         return Optional.of(savedTask);
     }
 
@@ -84,6 +96,9 @@ public class TaskCommandServiceImpl implements TaskCommandService {
     public Optional<Task> handle(UpdateTaskCommand command) {
         var task = taskRepository.findById(command.taskId())
                 .orElseThrow(() -> new RuntimeException("Task not found"));
+        Set<Long> previousAssignedUserIds = task.getAssignedUsers().stream()
+                .map(user -> user.getId())
+                .collect(Collectors.toCollection(HashSet::new));
 
         task.updateDetails(
                 command.title(),
@@ -118,6 +133,20 @@ public class TaskCommandServiceImpl implements TaskCommandService {
         try {
             notifyIfDueSoon(updatedTask);
         } catch (Exception ignored) {
+        }
+
+        try {
+            syncTaskToGoogleCalendar(updatedTask);
+        } catch (Exception ignored) {
+        }
+
+        if (command.assignedUserIds() != null) {
+            Set<Long> currentAssignedUserIds = updatedTask.getAssignedUsers().stream()
+                    .map(user -> user.getId())
+                    .collect(Collectors.toSet());
+            previousAssignedUserIds.stream()
+                    .filter(userId -> !currentAssignedUserIds.contains(userId))
+                    .forEach(userId -> deleteTaskEventForUser(updatedTask, userId));
         }
 
         return Optional.of(updatedTask);
@@ -160,6 +189,11 @@ public class TaskCommandServiceImpl implements TaskCommandService {
         } catch (Exception ignored) {
         }
 
+        try {
+            syncTaskToGoogleCalendar(updatedTask);
+        } catch (Exception ignored) {
+        }
+
         return Optional.of(updatedTask);
     }
 
@@ -167,6 +201,11 @@ public class TaskCommandServiceImpl implements TaskCommandService {
     public Optional<Task> handle(DeleteTaskCommand command) {
         var task = taskRepository.findById(command.taskId())
                 .orElseThrow(() -> new RuntimeException("Task not found"));
+
+        try {
+            deleteTaskGoogleCalendarEvents(task);
+        } catch (Exception ignored) {
+        }
 
         taskRepository.delete(task);
         return Optional.of(task);
@@ -181,7 +220,66 @@ public class TaskCommandServiceImpl implements TaskCommandService {
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
         task.removeUser(user);
-        taskRepository.save(task);
+        var updatedTask = taskRepository.save(task);
+
+        deleteTaskEventForUser(updatedTask, user.getId());
+
+        try {
+            syncTaskToGoogleCalendar(updatedTask);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void syncTaskToGoogleCalendar(Task task) {
+        if (task.getEndDate() == null || task.getProject() == null) {
+            return;
+        }
+
+        var leaderId = task.getProject().getLeaderId();
+        if (leaderId != null) {
+            upsertTaskEventForUser(task, leaderId);
+        }
+
+        task.getAssignedUsers().forEach(user -> upsertTaskEventForUser(task, user.getId()));
+    }
+
+    private void deleteTaskGoogleCalendarEvents(Task task) {
+        if (task.getProject() == null) {
+            return;
+        }
+
+        var leaderId = task.getProject().getLeaderId();
+        if (leaderId != null) {
+            deleteTaskEventForUser(task, leaderId);
+        }
+
+        task.getAssignedUsers().forEach(user -> deleteTaskEventForUser(task, user.getId()));
+    }
+
+    private void upsertTaskEventForUser(Task task, Long userId) {
+        if (userId == null || task.getEndDate() == null) {
+            return;
+        }
+
+        String eventId = buildTaskEventId(task.getId(), userId);
+        String title = "Vence: " + task.getTitle();
+        String description = "Proyecto: " + task.getProject().getName()
+                + "\nTarea: " + task.getTitle()
+                + (task.getDescription() != null && !task.getDescription().isBlank()
+                ? "\n" + task.getDescription()
+                : "");
+        googleCalendarService.upsertDeadlineEvent(userId, eventId, title, description, task.getEndDate());
+    }
+
+    private void deleteTaskEventForUser(Task task, Long userId) {
+        if (userId == null) {
+            return;
+        }
+        googleCalendarService.deleteEvent(userId, buildTaskEventId(task.getId(), userId));
+    }
+
+    private String buildTaskEventId(Long taskId, Long userId) {
+        return "task-" + taskId + "-user-" + userId;
     }
 
     private void notifyIfDueSoon(Task task) {

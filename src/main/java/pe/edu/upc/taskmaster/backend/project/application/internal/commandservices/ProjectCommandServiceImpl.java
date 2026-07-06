@@ -9,6 +9,7 @@ import pe.edu.upc.taskmaster.backend.project.domain.model.commands.*;
 import pe.edu.upc.taskmaster.backend.project.domain.model.valueobjects.ProjectCode;
 import pe.edu.upc.taskmaster.backend.project.domain.services.ProjectCommandService;
 import pe.edu.upc.taskmaster.backend.project.infrastructure.persistence.jpa.repositories.ProjectRepository;
+import pe.edu.upc.taskmaster.backend.meeting.application.external.GoogleCalendarService;
 import pe.edu.upc.taskmaster.backend.notification.domain.services.NotificationCommandService;
 import pe.edu.upc.taskmaster.backend.notification.domain.model.commands.CreateNotificationCommand;
 
@@ -20,12 +21,15 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
     private final ProjectRepository projectRepository;
     private final UserRepository userRepository;
     private final NotificationCommandService notificationCommandService;
+    private final GoogleCalendarService googleCalendarService;
 
     public ProjectCommandServiceImpl(ProjectRepository projectRepository, UserRepository userRepository,
-                                     NotificationCommandService notificationCommandService) {
+                                     NotificationCommandService notificationCommandService,
+                                     GoogleCalendarService googleCalendarService) {
         this.projectRepository = projectRepository;
         this.userRepository = userRepository;
         this.notificationCommandService = notificationCommandService;
+        this.googleCalendarService = googleCalendarService;
     }
 
     @Override
@@ -47,6 +51,7 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
 
         var project=new Project(createProjectCommand);
         projectRepository.save(project);
+        syncProjectToGoogleCalendar(project);
 
         return project.getId();
     }
@@ -65,6 +70,7 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
         var updatedProject=project.updateProject(updateProjectCommand);
 
         projectRepository.save(updatedProject);
+        syncProjectToGoogleCalendar(updatedProject);
 
         return  Optional.of(updatedProject);
     }
@@ -73,15 +79,17 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
     @Transactional
     public void handle(DeleteProjectCommand deleteProjectCommand) {
         Long projectId = deleteProjectCommand.projectId();
-        if (!projectRepository.existsById(projectId)) {
-            throw new IllegalArgumentException("Project with ID " + projectId + " not found");
-        }
         try {
+            var project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new IllegalArgumentException("Project with ID " + projectId + " not found"));
+
             var usersInProject = userRepository.findByMemberInProjectsId(projectId);
             usersInProject.forEach(user -> {
                 user.removeFromProject(projectId);
                 userRepository.save(user);
             });
+            deleteProjectCalendarEvent(project);
+            project.getTasks().forEach(task -> deleteTaskCalendarEvents(task.getId(), project.getLeaderId(), task.getAssignedUsers().stream().map(u -> u.getId()).toList()));
             projectRepository.deleteById(projectId);
         } catch (Exception e) {
             throw new RuntimeException("Error while deleting project: " + e.getMessage(), e);
@@ -220,5 +228,45 @@ public class ProjectCommandServiceImpl implements ProjectCommandService {
         projectRepository.save(updatedProject);
 
         return Optional.of(updatedProjectCode);
+    }
+
+    private void syncProjectToGoogleCalendar(Project project) {
+        if (project.getLeaderId() == null || project.getEndDate() == null) {
+            return;
+        }
+
+        String eventId = buildProjectEventId(project.getId(), project.getLeaderId());
+        String title = "Vence proyecto: " + project.getName();
+        String description = project.getDescription();
+        googleCalendarService.upsertDeadlineEvent(project.getLeaderId(), eventId, title, description, project.getEndDate());
+    }
+
+    private void deleteProjectCalendarEvent(Project project) {
+        if (project == null || project.getId() == null || project.getLeaderId() == null) {
+            return;
+        }
+        googleCalendarService.deleteEvent(project.getLeaderId(), buildProjectEventId(project.getId(), project.getLeaderId()));
+    }
+
+    private void deleteTaskCalendarEvents(Long taskId, Long leaderId, java.util.List<Long> assignedUserIds) {
+        if (taskId == null) {
+            return;
+        }
+
+        if (leaderId != null) {
+            googleCalendarService.deleteEvent(leaderId, "task-" + taskId + "-user-" + leaderId);
+        }
+
+        if (assignedUserIds == null) {
+            return;
+        }
+
+        assignedUserIds.stream()
+                .filter(userId -> userId != null && !userId.equals(leaderId))
+                .forEach(userId -> googleCalendarService.deleteEvent(userId, "task-" + taskId + "-user-" + userId));
+    }
+
+    private String buildProjectEventId(Long projectId, Long leaderId) {
+        return "project-" + projectId + "-user-" + leaderId;
     }
 }

@@ -3,6 +3,7 @@ package pe.edu.upc.taskmaster.backend.meeting.application.external;
 import com.google.api.client.auth.oauth2.BearerToken;
 import com.google.api.client.auth.oauth2.Credential;
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.DateTime;
@@ -18,6 +19,7 @@ import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.Googl
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
+import java.time.Duration;
 import java.util.Date;
 import java.util.List;
 import java.util.Objects;
@@ -43,6 +45,67 @@ public class GoogleCalendarService {
                                  List<String> attendeeEmails) {
         var accessToken = googleAccountConnectionService.getValidAccessTokenForUserId(userId);
         return createMeetLinkWithAccessToken(accessToken, title, description, startTime, endTime, attendeeEmails);
+    }
+
+    public void upsertDeadlineEvent(Long userId,
+                                    String eventId,
+                                    String title,
+                                    String description,
+                                    Date dueDate) {
+        if (userId == null || userId <= 0) {
+            return;
+        }
+        if (eventId == null || eventId.isBlank() || dueDate == null) {
+            return;
+        }
+
+        var accessToken = googleAccountConnectionService.getValidAccessTokenForUserId(userId);
+        var calendarService = buildCalendarService(accessToken);
+        var event = new Event()
+                .setId(eventId)
+                .setSummary(title)
+                .setDescription(description)
+                .setStart(toEventDateTime(new Date(dueDate.getTime() - Duration.ofHours(1).toMillis())))
+                .setEnd(toEventDateTime(dueDate));
+
+        try {
+            calendarService.events().get("primary", eventId).execute();
+            calendarService.events().update("primary", eventId, event).execute();
+        } catch (GoogleJsonResponseException e) {
+            if (e.getStatusCode() == 404) {
+                try {
+                    calendarService.events().insert("primary", event).execute();
+                } catch (IOException ioException) {
+                    throw new IllegalStateException("Failed to create Google Calendar deadline event", ioException);
+                }
+                return;
+            }
+            throw new IllegalStateException("Failed to upsert Google Calendar deadline event", e);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to upsert Google Calendar deadline event", e);
+        }
+    }
+
+    public void deleteEvent(Long userId, String eventId) {
+        if (userId == null || userId <= 0) {
+            return;
+        }
+        if (eventId == null || eventId.isBlank()) {
+            return;
+        }
+
+        var accessToken = googleAccountConnectionService.getValidAccessTokenForUserId(userId);
+        var calendarService = buildCalendarService(accessToken);
+        try {
+            calendarService.events().delete("primary", eventId).execute();
+        } catch (GoogleJsonResponseException e) {
+            if (e.getStatusCode() == 404) {
+                return;
+            }
+            throw new IllegalStateException("Failed to delete Google Calendar event", e);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to delete Google Calendar event", e);
+        }
     }
 
     private String createMeetLinkWithAccessToken(String accessToken,
