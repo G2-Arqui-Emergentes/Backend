@@ -25,6 +25,7 @@ import pe.edu.upc.taskmaster.backend.meeting.interfaces.rest.transform.MeetingRe
 import pe.edu.upc.taskmaster.backend.meeting.interfaces.rest.transform.UpdateMeetingCommandFromResourceAssembler;
 
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @CrossOrigin(origins = "*", methods = { RequestMethod.POST, RequestMethod.GET, RequestMethod.PUT, RequestMethod.DELETE })
@@ -61,20 +62,22 @@ public class MeetingController {
             @ApiResponse(responseCode = "400", description = "Invalid input data"),
             @ApiResponse(responseCode = "401", description = "Unauthorized - Authentication required")
     })
-    public ResponseEntity<MeetingResource> createMeeting(@RequestBody CreateMeetingResource resource) {
+    public ResponseEntity<?> createMeeting(@RequestBody CreateMeetingResource resource) {
         try {
             Long leaderId = getAuthenticatedUserId();
             var createCommand = CreateMeetingCommandFromResourceAssembler.toCommandFromResource(resource, leaderId);
             var createdMeeting = meetingCommandService.handle(createCommand);
 
             if (createdMeeting.isEmpty()) {
-                return ResponseEntity.badRequest().build();
+                return ResponseEntity.badRequest().body(Map.of("message", "Meeting could not be created"));
             }
 
             var meetingResource = MeetingResourceFromEntityAssembler.toResourceFromEntity(createdMeeting.get());
             return ResponseEntity.status(HttpStatus.CREATED).body(meetingResource);
-        } catch (IllegalArgumentException | IllegalStateException e) {
-            return ResponseEntity.badRequest().build();
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("message", e.getMessage()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
     }
 

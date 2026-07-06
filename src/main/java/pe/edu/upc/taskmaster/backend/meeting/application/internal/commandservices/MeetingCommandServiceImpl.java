@@ -70,6 +70,7 @@ public class MeetingCommandServiceImpl implements MeetingCommandService {
                 .toList();
 
         var meetLink = googleCalendarService.createMeetLink(
+                leader.getId(),
                 createMeetingCommand.title(),
                 createMeetingCommand.description(),
                 createMeetingCommand.startTime(),

@@ -10,6 +10,9 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
+import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.AuthenticationEntryPoint;
@@ -17,10 +20,13 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.cors.CorsConfiguration;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.authorization.sfs.pipeline.BearerAuthorizationRequestFilter;
+import pe.edu.upc.taskmaster.backend.iam.infrastructure.authorization.sfs.handlers.GoogleOAuth2SuccessHandler;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.hashing.bcrypt.BCryptHashingService;
 import pe.edu.upc.taskmaster.backend.iam.infrastructure.tokens.jwt.BearerTokenService;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Web Security Configuration.
@@ -39,6 +45,8 @@ public class WebSecurityConfiguration {
   private final BearerTokenService tokenService;
   private final BCryptHashingService hashingService;
   private final AuthenticationEntryPoint unauthorizedRequestHandler;
+  private final ClientRegistrationRepository clientRegistrationRepository;
+  private final GoogleOAuth2SuccessHandler googleOAuth2SuccessHandler;
 
   /**
      * This is the constructor of the class.
@@ -51,11 +59,15 @@ public class WebSecurityConfiguration {
           @Qualifier("defaultUserDetailsService") UserDetailsService userDetailsService,
           BearerTokenService tokenService,
           BCryptHashingService hashingService,
-          AuthenticationEntryPoint authenticationEntryPoint) {
+          AuthenticationEntryPoint authenticationEntryPoint,
+          ClientRegistrationRepository clientRegistrationRepository,
+          GoogleOAuth2SuccessHandler googleOAuth2SuccessHandler) {
       this.userDetailsService = userDetailsService;
       this.tokenService = tokenService;
       this.hashingService = hashingService;
       this.unauthorizedRequestHandler = authenticationEntryPoint;
+      this.clientRegistrationRepository = clientRegistrationRepository;
+      this.googleOAuth2SuccessHandler = googleOAuth2SuccessHandler;
   }
 
   /**
@@ -98,6 +110,22 @@ public class WebSecurityConfiguration {
     return hashingService;
   }
 
+  @Bean
+  public OAuth2AuthorizationRequestResolver oauth2AuthorizationRequestResolver() {
+    var resolver = new DefaultOAuth2AuthorizationRequestResolver(
+            clientRegistrationRepository,
+            "/oauth2/authorization"
+    );
+    resolver.setAuthorizationRequestCustomizer(builder -> {
+      Map<String, Object> additionalParameters = new HashMap<>();
+      additionalParameters.put("access_type", "offline");
+      additionalParameters.put("prompt", "consent");
+      additionalParameters.put("include_granted_scopes", "true");
+      builder.additionalParameters(additionalParameters);
+    });
+    return resolver;
+  }
+
   /**
    * This method creates the security filter chain.
    * It also configures the http security.
@@ -117,7 +145,10 @@ public class WebSecurityConfiguration {
     http.csrf(csrfConfigurer -> csrfConfigurer.disable())
         .exceptionHandling(exceptionHandling -> exceptionHandling.authenticationEntryPoint(unauthorizedRequestHandler))
         .sessionManagement(customizer -> customizer.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
-        .oauth2Login(Customizer.withDefaults())
+        .oauth2Login(oauth2 -> oauth2
+                .authorizationEndpoint(authorizationEndpoint -> authorizationEndpoint
+                        .authorizationRequestResolver(oauth2AuthorizationRequestResolver()))
+                .successHandler(googleOAuth2SuccessHandler))
         .authorizeHttpRequests(
             authorizeRequests -> authorizeRequests
                     .requestMatchers(

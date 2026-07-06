@@ -13,11 +13,8 @@ import com.google.api.services.calendar.model.CreateConferenceRequest;
 import com.google.api.services.calendar.model.Event;
 import com.google.api.services.calendar.model.EventAttendee;
 import com.google.api.services.calendar.model.EventDateTime;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
-import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
-import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.stereotype.Service;
+import pe.edu.upc.taskmaster.backend.meeting.application.internal.services.GoogleAccountConnectionService;
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
@@ -30,21 +27,30 @@ import java.util.UUID;
 @Service
 public class GoogleCalendarService {
 
-    private static final String GOOGLE_REGISTRATION_ID = "google";
     private static final String APPLICATION_NAME = "taskmaster-backend";
 
-    private final OAuth2AuthorizedClientService authorizedClientService;
+    private final GoogleAccountConnectionService googleAccountConnectionService;
 
-    public GoogleCalendarService(OAuth2AuthorizedClientService authorizedClientService) {
-        this.authorizedClientService = authorizedClientService;
+    public GoogleCalendarService(GoogleAccountConnectionService googleAccountConnectionService) {
+        this.googleAccountConnectionService = googleAccountConnectionService;
     }
 
-    public String createMeetLink(String title,
+    public String createMeetLink(Long userId,
+                                 String title,
                                  String description,
                                  Date startTime,
                                  Date endTime,
                                  List<String> attendeeEmails) {
-        var accessToken = resolveAccessToken();
+        var accessToken = googleAccountConnectionService.getValidAccessTokenForUserId(userId);
+        return createMeetLinkWithAccessToken(accessToken, title, description, startTime, endTime, attendeeEmails);
+    }
+
+    private String createMeetLinkWithAccessToken(String accessToken,
+                                 String title,
+                                 String description,
+                                 Date startTime,
+                                 Date endTime,
+                                 List<String> attendeeEmails) {
         var calendarService = buildCalendarService(accessToken);
 
         try {
@@ -91,24 +97,6 @@ public class GoogleCalendarService {
         } catch (IOException e) {
             throw new IllegalStateException("Failed to create Google Calendar event", e);
         }
-    }
-
-    private String resolveAccessToken() {
-        Authentication authentication = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
-        if (!(authentication instanceof OAuth2AuthenticationToken oauth2Authentication)) {
-            throw new IllegalStateException("Google account is not connected");
-        }
-
-        OAuth2AuthorizedClient authorizedClient = authorizedClientService.loadAuthorizedClient(
-                GOOGLE_REGISTRATION_ID,
-                oauth2Authentication.getName()
-        );
-
-        if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
-            throw new IllegalStateException("Google access token is not available");
-        }
-
-        return authorizedClient.getAccessToken().getTokenValue();
     }
 
     private Calendar buildCalendarService(String accessToken) {
